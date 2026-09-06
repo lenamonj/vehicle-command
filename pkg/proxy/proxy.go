@@ -27,8 +27,10 @@ import (
 )
 
 const (
-	DefaultTimeout       = 10 * time.Second
-	maxRequestBodyBytes  = 512
+	DefaultTimeout = 10 * time.Second
+	// maxRequestBodyBytes bounds every client request body; ServeHTTP installs
+	// one MaxBytesReader with it ahead of every route.
+	maxRequestBodyBytes  = 1 << 20
 	vinLength            = 17
 	proxyProtocolVersion = "tesla-http-proxy/1.1.0"
 	MaxResponseLength    = 10000000
@@ -256,6 +258,10 @@ func (p *Proxy) forwardRequest(acct *account.Account, w http.ResponseWriter, req
 	if req.Body != nil {
 		requestBody, err = io.ReadAll(req.Body)
 		if err != nil {
+			if isRequestTooLarge(err) {
+				writeJSONError(w, http.StatusRequestEntityTooLarge, err)
+				return
+			}
 			writeJSONError(w, http.StatusBadGateway, err)
 			return
 		}
@@ -336,8 +342,13 @@ func (p *Proxy) forwardRequest(acct *account.Account, w http.ResponseWriter, req
 	}
 }
 
+// ServeHTTP routes a client request to a vehicle command, to the fleet
+// telemetry config signer, or to Tesla's REST API. Bodies larger than
+// maxRequestBodyBytes are refused with 413 Request Entity Too Large.
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	log.Info("Received %s request for %s", req.Method, req.URL.Path)
+
+	req.Body = http.MaxBytesReader(w, req.Body, maxRequestBodyBytes)
 
 	if req.URL.Path == "/health" {
 		p.handleHealthCheck(w, req)
@@ -382,6 +393,13 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	p.forwardRequest(acct, w, req)
 }
 
+// isRequestTooLarge reports whether err came from the MaxBytesReader that
+// ServeHTTP installs on every client body.
+func isRequestTooLarge(err error) bool {
+	var maxBytes *http.MaxBytesError
+	return errors.As(err, &maxBytes)
+}
+
 func (p *Proxy) handleHealthCheck(w http.ResponseWriter, req *http.Request) {
 	if req.Method != http.MethodGet {
 		writeJSONError(w, http.StatusMethodNotAllowed, nil)
@@ -398,6 +416,10 @@ func (p *Proxy) handleFleetTelemetryConfig(acct *account.Account, w http.Respons
 	}()
 	body, err := io.ReadAll(req.Body)
 	if err != nil {
+		if isRequestTooLarge(err) {
+			writeJSONError(w, http.StatusRequestEntityTooLarge, err)
+			return
+		}
 		writeJSONError(w, http.StatusBadRequest, fmt.Errorf("could not read request body: %s", err))
 		return
 	}
@@ -530,6 +552,9 @@ func extractCommandAction(ctx context.Context, req *http.Request, command string
 	var params RequestParameters
 	body, err := io.ReadAll(req.Body)
 	if err != nil {
+		if isRequestTooLarge(err) {
+			return nil, &inet.HTTPError{Code: http.StatusRequestEntityTooLarge, Message: err.Error()}
+		}
 		return nil, &inet.HTTPError{Code: http.StatusBadRequest, Message: "could not read request body"}
 	}
 	// Restore the body so fallbacks that forward the request (REST API / unsupported protocol)

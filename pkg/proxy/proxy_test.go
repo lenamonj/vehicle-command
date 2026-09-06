@@ -1194,3 +1194,15 @@ func TestDefaultFetchVehicleAndLiveVehicle(t *testing.T) {
 		t.Fatalf("Execute: %v", err)
 	}
 }
+
+func TestServeHTTPRejectsOversizedBody(t *testing.T) {
+	p := newTestProxy(t)
+	rec := httptest.NewRecorder()
+	body := bytes.Repeat([]byte("a"), maxRequestBodyBytes+1)
+	req := httptest.NewRequest(http.MethodPost, "/api/1/vehicles/"+testVIN+"/fleet_telemetry_config", bytes.NewReader(body))
+	req.Header.Set("Authorization", authHeader())
+	p.ServeHTTP(rec, req)
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status=%d body=%.120s", rec.Code, rec.Body.String())
+	}
+}
